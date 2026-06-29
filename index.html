@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>企业授信报告系统 V2 — 企查查 QCC MCP 6大Server</title>
+  <title>企业授信报告系统 V4 — 企查查 QCC MCP 6大Server + 智能缓存</title>
   <style>
     :root {
       --primary: #1a2d4e; --accent: #1d6fa4; --gold: #c8941a;
@@ -76,6 +76,16 @@
     .result-card { background: #e8f5e9; border-left: 4px solid var(--success); border-radius: 6px; padding: 20px; }
     .result-card h3 { font-size: 15px; color: var(--success); margin-bottom: 10px; }
 
+    .cache-info { background: #fff8e1; border-left: 4px solid var(--gold); border-radius: 6px; padding: 12px 16px; margin-bottom: 12px; font-size: 13px; display: none; }
+    .cache-info.active { display: block; }
+    .cache-info.full-hit { background: #e8f5e9; border-left-color: var(--success); }
+    .cache-info .cache-tag { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 11px; font-weight: 700; margin-right: 6px; }
+    .cache-info .cache-tag.hit { background: #c8e6c9; color: #2e7d32; }
+    .cache-info .cache-tag.partial { background: #fff3e0; color: #e65100; }
+    .cache-info .cache-tag.miss { background: #f5f5f5; color: #757575; }
+    .points-saved { font-size: 13px; color: #2e7d32; font-weight: 700; margin-top: 4px; }
+    .points-saved .points-num { font-size: 20px; }
+
     .footer { text-align: center; padding: 20px; color: var(--text-light); font-size: 12px; }
 
     .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 0.8s linear infinite; }
@@ -89,7 +99,7 @@
 <div class="header">
   <div class="header-brand">
     <span class="dot"></span>企业授信报告系统
-    <span style="font-weight:400;font-size:14px;opacity:0.8;">V2 · QCC MCP 6大Server</span>
+    <span style="font-weight:400;font-size:14px;opacity:0.8;">V4 · QCC MCP 6大Server + 智能缓存</span>
   </div>
   <span class="header-badge">普惠金融 · DOCX专业报告</span>
 </div>
@@ -131,7 +141,8 @@
 
   <!-- 进度卡片 -->
   <div class="card progress-section" id="progressCard">
-    <h2>⏳ 数据采集中...</h2>
+    <h2 id="progressTitle">⏳ 数据采集中...</h2>
+    <div class="cache-info" id="cacheInfoBox"></div>
     <div class="progress-stats">
       <span id="progressText">准备中...</span>
       <span id="progressCount">0 / 106</span>
@@ -148,6 +159,7 @@
     <div class="result-card">
       <h3 id="resultTitle"></h3>
       <p id="resultInfo" style="font-size:13px;color:#555;"></p>
+
     </div>
     <button class="btn btn-download" id="downloadBtn" onclick="downloadReport()">
       📥 下载 DOCX 授信报告
@@ -181,6 +193,25 @@ function log(msg, type) {
   box.scrollTop = box.scrollHeight;
 }
 
+function showCacheInfo(cacheInfo) {
+  const box = document.getElementById('cacheInfoBox');
+  box.className = 'cache-info active';
+  if (!cacheInfo) { box.classList.remove('active'); return; }
+
+  let html = '';
+  if (cacheInfo.status === 'full_hit') {
+    box.classList.add('full-hit');
+    html += '<span class="cache-tag hit">🔋 缓存全部命中</span> ';
+    html += '无需调用企查查API，直接复用缓存数据！';
+  } else if (cacheInfo.status === 'partial_hit') {
+    html += '<span class="cache-tag partial">📦 缓存部分命中</span> ';
+    html += `${cacheInfo.freshServers.length}个Server复用缓存，${cacheInfo.expiredServers.length}个Server需刷新。`;
+  } else {
+    html += '<span class="cache-tag miss">🆕 缓存未命中</span> 执行全量QCC数据采集（106个工具）...';
+  }
+  box.innerHTML = html;
+}
+
 async function startGenerate() {
   const company = document.getElementById('companyName').value.trim();
   const branch = document.getElementById('branch').value.trim();
@@ -193,6 +224,8 @@ async function startGenerate() {
   document.getElementById('progressCard').classList.add('active');
   document.getElementById('resultCard').classList.remove('active');
   document.getElementById('logBox').innerHTML = '';
+  document.getElementById('cacheInfoBox').classList.remove('active', 'full-hit');
+  document.getElementById('progressTitle').textContent = '⏳ 数据采集中...';
   generatedFile = null;
 
   const origin = window.location.origin || 'http://localhost:3000';
@@ -209,7 +242,35 @@ async function startGenerate() {
 
       switch (data.type) {
         case 'start':
-          log('[系统] 连接成功，开始串行采集工商数据...', 'info');
+          log('[系统] 连接成功，开始检查缓存...', 'info');
+          break;
+
+        case 'cache_check':
+          log('🔍 ' + data.message, 'info');
+          break;
+
+        case 'cache_hit':
+          if (data.status === 'full') {
+            log('🔋 ' + data.message, 'info');
+            showCacheInfo(data.cacheInfo);
+            document.getElementById('progressTitle').textContent = '🎯 缓存命中，跳过采集！';
+            document.getElementById('progressBar').style.width = '100%';
+            document.getElementById('progressCount').textContent = '0 / 0';
+            document.getElementById('progressText').textContent = '使用缓存数据，无需API调用';
+          } else {
+            log('📦 ' + data.message, 'info');
+            showCacheInfo(data.cacheInfo);
+            document.getElementById('progressTitle').textContent = '⏳ 部分刷新中...';
+          }
+          break;
+
+        case 'cache_miss':
+          log('🆕 ' + data.message, 'info');
+          showCacheInfo({ status: 'miss' });
+          break;
+
+        case 'collect_start':
+          log('📡 ' + data.message, 'info');
           break;
 
         case 'progress':
@@ -225,9 +286,17 @@ async function startGenerate() {
           }
           break;
 
+        case 'cache_saving':
+          log('💾 ' + data.message, 'info');
+          break;
+
+        case 'cache_saved':
+          log('✅ ' + data.message, 'ok');
+          break;
+
         case 'generating':
-          log('📝 数据采集完成，正在生成 DOCX 报告...', 'info');
-          document.getElementById('progressText').textContent = '正在生成 DOCX 报告...';
+          log('📝 ' + (data.message || '数据采集完成，正在生成 DOCX 报告...'), 'info');
+          document.getElementById('progressText').textContent = data.message || '正在生成 DOCX 报告...';
           break;
 
         case 'complete':
@@ -236,10 +305,15 @@ async function startGenerate() {
           document.getElementById('progressCard').classList.remove('active');
           document.getElementById('resultCard').classList.add('active');
           document.getElementById('resultTitle').textContent = data.fileName;
-          document.getElementById('resultInfo').innerHTML =
-            '文件大小: ' + (data.size / 1024).toFixed(1) + ' KB<br/>' +
-            '数据工具: ' + (data.errors && data.errors.length > 0 ? (106 - data.errors.length) + '/106 成功' : '106/106 全部成功') +
-            (data.errors && data.errors.length > 0 ? '<br/>⚠️ ' + data.errors.length + ' 个工具异常（非关键）' : '');
+
+          let resultHtml = '文件大小: ' + (data.size / 1024).toFixed(1) + ' KB<br/>';
+          resultHtml += '数据工具: ' + (data.errors && data.errors.length > 0 ? (106 - data.errors.length) + '/106 成功' : '106/106 全部成功');
+          if (data.errors && data.errors.length > 0) resultHtml += '<br/>⚠️ ' + data.errors.length + ' 个工具异常（非关键）';
+          if (data.cacheInfo && data.cacheInfo.status === 'full_hit') {
+            resultHtml += '<br/>🔋 本次全部使用缓存，0 API调用';
+          }
+          document.getElementById('resultInfo').innerHTML = resultHtml;
+
           break;
 
         case 'error':

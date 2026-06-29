@@ -1,13 +1,44 @@
 /**
- * 企业授信报告系统 V3 — 独立 DOCX 生成服务（范例对齐版）
+ * 企业授信报告系统 V4 — 独立 DOCX 生成服务（范例对齐版 + QCC数据缓存）
  * 集成企查查 QCC MCP 6大Server（company/risk/ipr/operation/executive/history）
  * 共调用 106 个工具，按"三品三表三流"方法论生成专业授信调查报告
+ * 缓存策略：CloudBase NoSQL（HTTP API），分级过期（基础30天/经营7天/风险1天）
  */
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 const https = require('https');
+
+// ============ 本地文件缓存配置 ============
+const CACHE_DIR = path.join(__dirname, '.cache');
+if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
+
+// 尝试加载 CloudBase SDK（线上容器环境自动可用）
+let cloudbaseSDK = null;
+try {
+  cloudbaseSDK = require('@cloudbase/node-sdk');
+  console.log('[缓存] CloudBase SDK 已加载，线上模式：使用数据库缓存');
+} catch (e) {
+  console.log('[缓存] CloudBase SDK 未加载，本地模式：使用文件缓存');
+}
+
+// 分级缓存过期时间（毫秒）
+const CACHE_TTL = {
+  base: 30 * 24 * 3600 * 1000,      // 基础信息：30天
+  business: 7 * 24 * 3600 * 1000,    // 经营信息：7天
+  risk: 1 * 24 * 3600 * 1000,        // 风险信息：1天
+  ipr: 7 * 24 * 3600 * 1000,         // 知识产权：7天
+};
+
+const SERVER_CATEGORY = {
+  company: 'base',
+  risk: 'risk',
+  ipr: 'ipr',
+  operation: 'business',
+  executive: 'risk',
+  history: 'base',
+};
 const {
   Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
   Header, Footer, AlignmentType, BorderStyle, WidthType, ShadingType,
@@ -193,6 +224,117 @@ async function collectAllData(companyName, progressCallback) {
   for (const [tool, label] of histTools) { await fetch('history', tool, { searchKey: uscc }, label); await delay(250); }
 
   return { data, errors };
+}
+
+// ============ 缓存管理（双模：本地文件 + CloudBase 数据库） ============
+
+function cacheFilePath(searchKey) {
+  const crypto = require('crypto');
+  const hash = crypto.createHash('md5').update(searchKey).digest('hex');
+  return path.join(CACHE_DIR, hash + '.json');
+}
+
+function checkCacheExpiry(cache) {
+  const now = Date.now();
+  const expired = [];
+  for (const [server, category] of Object.entries(SERVER_CATEGORY)) {
+    const ttl = CACHE_TTL[category];
+    const lu = (cache.lastUpdated && cache.lastUpdated[server]) ? cache.lastUpdated[server] : 0;
+    if (now - lu > ttl) expired.push(server);
+  }
+  return expired;
+}
+
+function makeCacheInfo(cache, expired) {
+  return {
+    status: expired.length === 0 ? 'full_hit' : 'partial_hit',
+    cachedAt: cache.cachedAt,
+    expiredServers: expired,
+    freshServers: Object.keys(SERVER_CATEGORY).filter(s => !expired.includes(s)),
+  };
+}
+
+// === 本地文件缓存 ===
+async function getFileCache(searchKey) {
+  const fp = cacheFilePath(searchKey);
+  if (!fs.existsSync(fp)) return null;
+  const cache = JSON.parse(fs.readFileSync(fp, 'utf-8'));
+  const expired = checkCacheExpiry(cache);
+  console.log(`[缓存·本地] ${expired.length === 0 ? 'full' : 'partial'}: ${searchKey}`);
+  return { cache, expired };
+}
+
+async function setFileCache(searchKey, allData, updatedServers) {
+  const fp = cacheFilePath(searchKey);
+  const now = Date.now();
+  const lu = {};
+  for (const s of updatedServers) lu[s] = now;
+  let ex = {};
+  if (fs.existsSync(fp)) { try { ex = JSON.parse(fs.readFileSync(fp, 'utf-8')); } catch {} }
+  fs.writeFileSync(fp, JSON.stringify({
+    searchKey, data: { ...ex.data, ...allData },
+    lastUpdated: { ...ex.lastUpdated, ...lu }, cachedAt: now, createdAt: ex.createdAt || now,
+  }));
+  console.log(`[缓存·本地] 已写入: ${searchKey}`);
+}
+
+// === CloudBase 数据库缓存（线上使用） ===
+let cbApp = null, cbDb = null;
+function initCloudBase() {
+  if (!cloudbaseSDK) return false;
+  if (cbDb) return true;
+  try {
+    cbApp = cloudbaseSDK.init({ env: 'sihui2026-d6gtqfgdw7803a003' });
+    cbDb = cbApp.database();
+    console.log('[缓存·云开发] 数据库已连接');
+    return true;
+  } catch (e) { console.error('[缓存·云开发] 初始化失败:', e.message); return false; }
+}
+
+async function getCloudBaseCache(searchKey) {
+  if (!initCloudBase()) return null;
+  try {
+    const res = await cbDb.collection(CACHE_COLLECTION).where({ searchKey }).limit(1).get();
+    if (!res.data || res.data.length === 0) return null;
+    const cache = res.data[0];
+    const expired = checkCacheExpiry(cache);
+    console.log(`[缓存·云开发] ${expired.length === 0 ? 'full' : 'partial'}: ${searchKey}`);
+    return { cache, expired };
+  } catch (e) { console.error('[缓存·云开发] 读取失败:', e.message); return null; }
+}
+
+async function setCloudBaseCache(searchKey, allData, updatedServers) {
+  if (!initCloudBase()) return;
+  try {
+    const now = Date.now();
+    const lu = {};
+    for (const s of updatedServers) lu[s] = now;
+    const ex = await cbDb.collection(CACHE_COLLECTION).where({ searchKey }).limit(1).get();
+    if (ex.data && ex.data.length > 0) {
+      const d = ex.data[0];
+      await cbDb.collection(CACHE_COLLECTION).doc(d._id).update({
+        data: { ...d.data, ...allData }, lastUpdated: { ...d.lastUpdated, ...lu }, cachedAt: now,
+      });
+    } else {
+      await cbDb.collection(CACHE_COLLECTION).add({ searchKey, data: allData, lastUpdated: lu, cachedAt: now, createdAt: now });
+    }
+    console.log(`[缓存·云开发] 已写入: ${searchKey}`);
+  } catch (e) { console.error('[缓存·云开发] 写入失败:', e.message); }
+}
+
+// === 统一缓存接口 ===
+async function getCache(searchKey) {
+  // 优先 CloudBase，回退本地
+  let r = await getCloudBaseCache(searchKey);
+  if (r) return { hit: true, data: r.cache.data || {}, expiredServers: r.expired, cacheInfo: makeCacheInfo(r.cache, r.expired) };
+  r = await getFileCache(searchKey);
+  if (r) return { hit: true, data: r.cache.data || {}, expiredServers: r.expired, cacheInfo: makeCacheInfo(r.cache, r.expired) };
+  console.log('[缓存] 未命中:', searchKey);
+  return { hit: false, data: null, expiredServers: Object.keys(SERVER_CATEGORY), cacheInfo: { status: 'miss' } };
+}
+
+async function setCache(searchKey, allData, updatedServers) {
+  await Promise.allSettled([setCloudBaseCache(searchKey, allData, updatedServers), setFileCache(searchKey, allData, updatedServers)]);
 }
 
 // ============ 数据提取辅助 ============
@@ -879,12 +1021,68 @@ app.get('/api/generate-sse', async (req, res) => {
   try {
     send({ type: 'start', companyName });
 
-    const { data, errors } = await collectAllData(companyName, (p) => {
-      send({ type: 'progress', ...p });
-    });
+    // ===== 缓存查询 =====
+    send({ type: 'cache_check', message: '正在查询缓存...' });
+    const cache = await getCache(companyName);
+    const cacheInfo = cache.cacheInfo;
 
-    send({ type: 'generating' });
-    const doc = buildDocxReport(data, branch || '中国工商银行', loanAmount || '500');
+    if (cacheInfo.status === 'full_hit') {
+      // 全部命中，直接使用缓存数据
+      send({ type: 'cache_hit', status: 'full', message: '缓存全部命中！跳过QCC采集，直接生成报告。', cacheInfo });
+
+      send({ type: 'generating', message: '正在生成DOCX报告（缓存数据）...' });
+      const doc = buildDocxReport(cache.data, branch || '中国工商银行', loanAmount || '500');
+      const buf = await Packer.toBuffer(doc);
+      const safeName = companyName.replace(/[\\/:*?"<>|]/g, '_');
+      const fileName = safeName + '_普惠金融授信调查报告.docx';
+      const outDir = __dirname;
+      const filePath = path.join(outDir, fileName);
+      fs.writeFileSync(filePath, buf);
+
+      send({ type: 'complete', fileName, filePath, size: buf.length, errors: [], cacheInfo });
+      res.end();
+      return;
+    }
+
+    // ===== 部分命中或未命中，执行采集 =====
+    if (cacheInfo.status === 'partial_hit') {
+      send({
+        type: 'cache_hit', status: 'partial',
+        message: `缓存部分命中：${cacheInfo.freshServers.length}个Server复用，${cacheInfo.expiredServers.length}个Server需刷新。`,
+        cacheInfo
+      });
+    } else {
+      send({ type: 'cache_miss', message: '缓存未命中，执行全量QCC数据采集...' });
+    }
+
+    // 执行数据采集（仅采集过期的 Server）
+    const expiredServers = cacheInfo.expiredServers || Object.keys(SERVER_CATEGORY);
+    let collectedData = {};
+    let allErrors = [];
+
+    if (cache.hit && cache.data) {
+      // 部分命中：保留缓存中未过期的数据
+      collectedData = { ...cache.data };
+    }
+
+    // 只采集过期的 Server
+    if (expiredServers.length > 0) {
+      send({ type: 'collect_start', message: `正在采集 ${expiredServers.length} 个Server的数据...`, expiredServers });
+      const result = await collectAllData(companyName, (p) => {
+        send({ type: 'progress', ...p, cacheInfo });
+      });
+      // 合并新采集的数据
+      collectedData = { ...collectedData, ...result.data };
+      allErrors = result.errors;
+
+      // 写入缓存
+      send({ type: 'cache_saving', message: '正在保存数据到缓存...' });
+      await setCache(companyName, collectedData, expiredServers);
+      send({ type: 'cache_saved', message: '缓存已更新' });
+    }
+
+    send({ type: 'generating', message: '正在生成DOCX报告...' });
+    const doc = buildDocxReport(collectedData, branch || '中国工商银行', loanAmount || '500');
 
     const buf = await Packer.toBuffer(doc);
     const safeName = companyName.replace(/[\\/:*?"<>|]/g, '_');
@@ -893,7 +1091,7 @@ app.get('/api/generate-sse', async (req, res) => {
     const filePath = path.join(outDir, fileName);
     fs.writeFileSync(filePath, buf);
 
-    send({ type: 'complete', fileName, filePath, size: buf.length, errors });
+    send({ type: 'complete', fileName, filePath, size: buf.length, errors: allErrors, cacheInfo });
     res.end();
   } catch (e) {
     send({ type: 'error', message: e.message });

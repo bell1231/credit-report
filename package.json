@@ -1,7 +1,7 @@
 {
-  "name": "credit-report-v2",
-  "version": "1.1.0",
-  "description": "企业授信报告系统 V2 - 企查查 QCC MCP 6大Server DOCX生成",
+  "name": "credit-report-v4",
+  "version": "2.0.0",
+  "description": "企业授信报告系统 V4 - 企查查 QCC MCP 6大Server + CloudBase缓存 DOCX生成",
   "scripts": {
     "start": "node server.js"
   },
