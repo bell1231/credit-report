@@ -1,0 +1,71 @@
+{
+  "companyName": "",
+  "creditCode": "",
+  "legalPerson": "",
+  "regCapital": "",
+  "estDate": "",
+  "companyType": "",
+  "status": "",
+  "industry": "",
+  "employees": "",
+  "regAddr": "",
+  "businessScope": "",
+  "contactPhone": "",
+  "contactEmail": "",
+  "website": "",
+  "acName": "",
+  "boList": [],
+  "shareholderList": [],
+  "invList": [],
+  "personnelList": [],
+  "finPeriod": "",
+  "revenue": "",
+  "netProfit": "",
+  "totalAssets": "",
+  "totalLiabilities": "",
+  "equity": "",
+  "assetRatio": "",
+  "netMargin": "",
+  "revenueGrowth": "",
+  "roe": "",
+  "arYear": "",
+  "arRevenue": "",
+  "arNetProfit": "",
+  "arTotalAssets": "",
+  "arTotalLiabilities": "",
+  "riskScanList": [],
+  "honorList": [],
+  "qualList": [],
+  "patentList": [],
+  "patentCount": 0,
+  "swList": [],
+  "swCount": 0,
+  "trademarkList": [],
+  "trademarkCount": 0,
+  "biddingList": [],
+  "finRecordsList": [],
+  "adminLicenseList": [],
+  "execPositionsList": [],
+  "execRiskScan": {
+    "无匹配项": "已匹配到公司，但未匹配到人员。请核实“人名”的姓名准确性，并确认其是否属于该公司的董监高成员。"
+  },
+  "changeList": [],
+  "histRegList": [],
+  "histExecList": [],
+  "histShareholderList": [],
+  "taxpayerQual": {
+    "无匹配项": "未匹配到搜索关键词。请输入完整企业名称 或 18 位统一社会信用代码；或调用「企业实体识别」检索候选。"
+  },
+  "newsSentiment": {
+    "无匹配项": "未匹配到搜索关键词。请输入完整企业名称 或 18 位统一社会信用代码；或调用「企业实体识别」检索候选。"
+  },
+  "rankingList": {
+    "无匹配项": "未匹配到搜索关键词。请输入完整企业名称 或 18 位统一社会信用代码；或调用「企业实体识别」检索候选。"
+  },
+  "listing": {
+    "无匹配项": "未匹配到搜索关键词。请输入完整企业名称 或 18 位统一社会信用代码；或调用「企业实体识别」检索候选。"
+  },
+  "profile": {
+    "无匹配项": "未匹配到搜索关键词。请输入完整企业名称 或 18 位统一社会信用代码；或调用「企业实体识别」检索候选。"
+  }
+}

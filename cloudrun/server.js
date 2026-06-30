@@ -50,6 +50,357 @@ app.use(cors({ origin: (_, cb) => cb(null, true), credentials: false }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static(__dirname));
 
+// ============ 邮件服务 ============
+const nodemailer = require('nodemailer');
+const transporter = nodemailer.createTransport({
+  host: 'smtp.exmail.qq.com',
+  port: 465,
+  secure: true,
+  auth: { user: 'wanderer@sihuiedu.cn', pass: 'wTbdmbfeUFY4LutX' },
+});
+
+// 验证码存储（内存，5分钟过期）
+const verifyCodes = new Map(); // email -> { code, expires, type }
+
+function generateCode() {
+  return String(Math.floor(100000 + Math.random() * 900000)); // 6位数字
+}
+
+async function sendVerifyCode(email, type) {
+  const code = generateCode();
+  verifyCodes.set(email.toLowerCase(), { code, expires: Date.now() + 5 * 60 * 1000, type });
+
+  const subject = type === 'register' ? '注册验证码 - 企业授信报告系统' : '密码重置验证码 - 企业授信报告系统';
+  const html = `
+    <div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;border:1px solid #e0e0e0;border-radius:8px;overflow:hidden;">
+      <div style="background:#1a2d4e;padding:20px;text-align:center;">
+        <span style="color:#c8941a;font-size:20px;font-weight:bold;">●</span>
+        <span style="color:#fff;font-size:18px;margin-left:8px;">企业授信报告系统</span>
+      </div>
+      <div style="padding:24px;">
+        <p style="font-size:14px;color:#333;">您好，</p>
+        <p style="font-size:14px;color:#333;">您的${type === 'register' ? '注册' : '密码重置'}验证码为：</p>
+        <div style="text-align:center;margin:20px 0;">
+          <span style="font-size:32px;font-weight:bold;color:#1d6fa4;letter-spacing:8px;">${code}</span>
+        </div>
+        <p style="font-size:12px;color:#999;">验证码5分钟内有效，请勿泄露给他人。</p>
+      </div>
+    </div>`;
+  await transporter.sendMail({ from: '"企业授信报告系统" <wanderer@sihuiedu.cn>', to: email, subject, html });
+  return true;
+}
+
+function checkCode(email, code, type) {
+  const record = verifyCodes.get(email.toLowerCase());
+  if (!record) return false;
+  if (Date.now() > record.expires) { verifyCodes.delete(email.toLowerCase()); return false; }
+  if (record.type !== type) return false;
+  if (record.code !== code) return false;
+  return true; // 只检查，不删除
+}
+
+function consumeCode(email, code, type) {
+  if (!checkCode(email, code, type)) return false;
+  verifyCodes.delete(email.toLowerCase());
+  return true;
+}
+
+// 密码强度校验
+function validatePassword(password) {
+  if (password.length < 8) return '密码长度至少8位';
+  let types = 0;
+  if (/[A-Z]/.test(password)) types++;
+  if (/[a-z]/.test(password)) types++;
+  if (/[0-9]/.test(password)) types++;
+  if (/[^A-Za-z0-9]/.test(password)) types++;
+  if (types < 3) return '密码需包含大写字母、小写字母、数字、特殊符号中至少三种';
+  if (/['\"|\\;`]/.test(password)) return '符号不能包含此类特殊符号';
+  return null;
+}
+
+// ============ 用户认证系统 ============
+const crypto = require('crypto');
+
+// 初始化用户数据目录和文件
+const DATA_DIR = path.join(__dirname, '.data');
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+
+const USERS_FILE = path.join(DATA_DIR, 'users.json');
+
+// Token 密钥持久化（避免重启后所有用户需重新登录）
+const SECRET_FILE = path.join(DATA_DIR, '.secret');
+let TOKEN_SECRET;
+if (fs.existsSync(SECRET_FILE)) {
+  TOKEN_SECRET = fs.readFileSync(SECRET_FILE, 'utf-8').trim();
+} else {
+  TOKEN_SECRET = crypto.randomBytes(32).toString('hex');
+  fs.writeFileSync(SECRET_FILE, TOKEN_SECRET);
+}
+const TOKEN_EXPIRY = 24 * 3600 * 1000; // 24小时
+
+// ============ 用户数据库（双模：CloudBase / 本地 JSON） ============
+let userDb = null; // CloudBase 数据库实例
+
+// 线上模式：CloudBase SDK 自动鉴权（仅在容器环境启用）
+const isCloudRun = !!process.env.TCB_ENV_ID || !!process.env.TCB_SESSION_TOKEN;
+if (cloudbaseSDK && isCloudRun) {
+  try {
+    const cbApp = cloudbaseSDK.init({ env: 'sihui2026-d6gtqfgdw7803a003' });
+    userDb = cbApp.database();
+    console.log('[用户库] CloudBase 数据库已连接');
+  } catch (e) {
+    console.log('[用户库] CloudBase 连接失败，回退本地:', e.message);
+  }
+}
+
+if (!userDb) {
+  console.log('[用户库] 使用本地 JSON 文件存储');
+}
+
+async function loadUsers() {
+  if (userDb) {
+    try {
+      const res = await userDb.collection('users').limit(1000).get();
+      const users = {};
+      if (res.data) {
+        for (const doc of res.data) {
+          users[doc.email] = doc;
+        }
+      }
+      return users;
+    } catch (e) {
+      console.error('[用户库] CloudBase 读取失败:', e.message);
+    }
+  }
+  // 回退本地
+  try {
+    if (fs.existsSync(USERS_FILE)) return JSON.parse(fs.readFileSync(USERS_FILE, 'utf-8'));
+  } catch {}
+  return {};
+}
+
+async function saveUsers(users) {
+  // 本地始终保存一份
+  try { fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2)); } catch {}
+
+  // CloudBase 同步
+  if (userDb) {
+    for (const [email, userData] of Object.entries(users)) {
+      try {
+        const existing = await userDb.collection('users').where({ email }).limit(1).get();
+        if (existing.data && existing.data.length > 0) {
+          await userDb.collection('users').doc(existing.data[0]._id).update({
+            passwordHash: userData.passwordHash,
+            name: userData.name || email.split('@')[0],
+            updatedAt: Date.now(),
+          });
+        } else {
+          await userDb.collection('users').add({
+            email,
+            passwordHash: userData.passwordHash,
+            name: userData.name || email.split('@')[0],
+            createdAt: userData.createdAt || Date.now(),
+            updatedAt: Date.now(),
+          });
+        }
+      } catch (e) {
+        console.error(`[用户库] 同步失败 ${email}:`, e.message);
+      }
+    }
+  }
+}
+
+// 查找单个用户（CloudBase 优先）
+async function findUser(email) {
+  if (userDb) {
+    try {
+      const res = await userDb.collection('users').where({ email: email.toLowerCase() }).limit(1).get();
+      if (res.data && res.data.length > 0) return res.data[0];
+    } catch (e) { console.error('[用户库] 查找失败:', e.message); }
+  }
+  const users = await loadUsers();
+  return users[email.toLowerCase()] || null;
+}
+
+// 密码哈希
+function hashPassword(password) {
+  return crypto.createHash('sha256').update(password + TOKEN_SECRET).digest('hex');
+}
+
+// 生成 token
+function generateToken(email) {
+  const payload = { email, exp: Date.now() + TOKEN_EXPIRY };
+  const data = Buffer.from(JSON.stringify(payload)).toString('base64');
+  const sig = crypto.createHmac('sha256', TOKEN_SECRET).update(data).digest('hex');
+  return data + '.' + sig;
+}
+
+// 验证 token
+function verifyToken(token) {
+  try {
+    const [data, sig] = token.split('.');
+    const expectedSig = crypto.createHmac('sha256', TOKEN_SECRET).update(data).digest('hex');
+    if (sig !== expectedSig) return null;
+    const payload = JSON.parse(Buffer.from(data, 'base64').toString());
+    if (payload.exp < Date.now()) return null;
+    return payload;
+  } catch { return null; }
+}
+
+// 登录 API
+app.post('/api/login', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) return res.json({ success: false, message: '请输入邮箱和密码' });
+
+  const user = await findUser(email);
+  if (!user || user.passwordHash !== hashPassword(password)) {
+    return res.json({ success: false, message: '账户/密码错误，请重试' });
+  }
+
+  const token = generateToken(email);
+  res.json({ success: true, token, email: user.email, name: user.name || email });
+});
+
+// 发送验证码 API
+app.post('/api/send-code', async (req, res) => {
+  const { email, type } = req.body; // type: 'register' | 'reset'
+  if (!email || !type) return res.json({ success: false, message: '缺少参数' });
+
+  const existing = await findUser(email);
+
+  if (type === 'register' && existing) {
+    return res.json({ success: false, message: '该邮箱已注册，请直接登录' });
+  }
+  if (type === 'reset' && !existing) {
+    return res.json({ success: false, message: '邮箱未注册，请先注册' });
+  }
+
+  try {
+    await sendVerifyCode(email, type);
+    res.json({ success: true, message: '验证码已发送，请查收邮件' });
+  } catch (e) {
+    res.json({ success: false, message: '验证码发送失败：' + e.message });
+  }
+});
+
+// 验证验证码 API（只检查不消耗）
+app.post('/api/check-code', (req, res) => {
+  const { email, code, type } = req.body;
+  if (!email || !code || !type) return res.json({ success: false, message: '缺少参数' });
+  const ok = checkCode(email, code, type);
+  res.json({ success: ok, message: ok ? '验证通过' : '验证码错误或已过期' });
+});
+
+// 注册 API
+app.post('/api/register', async (req, res) => {
+  const { email, password, code } = req.body;
+  if (!email || !password || !code) return res.json({ success: false, message: '缺少参数' });
+  const pwErr = validatePassword(password);
+  if (pwErr) return res.json({ success: false, message: pwErr });
+
+  const emailLower = email.toLowerCase();
+  const existing = await findUser(email);
+  if (existing) return res.json({ success: false, message: '该邮箱已注册' });
+
+  if (!consumeCode(email, code, 'register')) {
+    return res.json({ success: false, message: '验证码错误或已过期' });
+  }
+
+  const users = await loadUsers();
+  users[emailLower] = {
+    email: emailLower,
+    passwordHash: hashPassword(password),
+    name: emailLower.split('@')[0],
+    createdAt: Date.now(),
+  };
+  await saveUsers(users);
+
+  const token = generateToken(emailLower);
+  res.json({ success: true, token, email: emailLower, message: '注册成功' });
+});
+
+// 重置密码 API
+app.post('/api/reset-password', async (req, res) => {
+  const { email, password, code } = req.body;
+  if (!email || !password || !code) return res.json({ success: false, message: '缺少参数' });
+  const pwErr = validatePassword(password);
+  if (pwErr) return res.json({ success: false, message: pwErr });
+
+  const emailLower = email.toLowerCase();
+  const existing = await findUser(email);
+  if (!existing) return res.json({ success: false, message: '邮箱未注册' });
+
+  if (!consumeCode(email, code, 'reset')) {
+    return res.json({ success: false, message: '验证码错误或已过期' });
+  }
+
+  const users = await loadUsers();
+  users[emailLower].passwordHash = hashPassword(password);
+  await saveUsers(users);
+  res.json({ success: true, message: '密码重置成功，请重新登录' });
+});
+
+// Token 验证 API（前端用于检查登录态）
+app.get('/api/verify', (req, res) => {
+  const auth = req.headers.authorization || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+  const payload = verifyToken(token);
+  res.json({ valid: !!payload, email: payload ? payload.email : null });
+});
+
+// 认证中间件
+function authMiddleware(req, res, next) {
+  const auth = req.headers.authorization || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : (req.query.token || '');
+  const payload = verifyToken(token);
+  if (!payload) return res.status(401).json({ error: '未登录或登录已过期，请重新登录' });
+  req.user = payload;
+  next();
+}
+
+// ============ 积分系统 ============
+const REPORT_COST = 200; // 每次生成报告消耗 200 积分
+const POINTS_RATE = 10;  // 1 人民币 = 10 积分
+
+// 获取用户积分
+app.get('/api/points', authMiddleware, async (req, res) => {
+  const user = await findUser(req.user.email);
+  res.json({ points: user ? (user.points || 0) : 0, email: req.user.email, reportCost: REPORT_COST });
+});
+
+// 积分检查 + 扣费中间件（用于报告生成）
+async function pointsMiddleware(req, res, next) {
+  const user = await findUser(req.user.email);
+  if (!user) return res.status(401).json({ error: '用户不存在' });
+  if ((user.points || 0) < REPORT_COST) {
+    return res.status(402).json({ error: '积分不足', need: REPORT_COST, have: user.points || 0, message: `积分不足，需要 ${REPORT_COST} 积分，当前 ${user.points || 0} 积分。请联系管理员充值（1元=10积分）。` });
+  }
+  req.userPoints = user.points || 0;
+  next();
+}
+
+// 扣费（在报告生成成功后调用）
+async function deductPoints(email) {
+  const users = await loadUsers();
+  const key = email.toLowerCase();
+  if (users[key]) {
+    users[key].points = Math.max(0, (users[key].points || 0) - REPORT_COST);
+    await saveUsers(users);
+    return users[key].points;
+  }
+  return 0;
+}
+
+// app.html 直接放行（前端 localStorage 自行校验 + API 层有 authMiddleware 保护）
+app.get('/app.html', (req, res) => {
+  res.sendFile(path.join(__dirname, 'app.html'));
+});
+
+// 根路径重定向到登录页
+app.get('/', (req, res) => {
+  res.redirect('/login.html');
+});
+
 // ============ QCC 配置 ============
 const QCC_TOKEN = process.env.QCC_API_TOKEN || 'Bearer MmDFP6lIn3akremGqfRhudPo0NON0LTrz92cBzCHtI3eA7IZ';
 const QCC_SERVERS = {
@@ -281,7 +632,7 @@ async function setFileCache(searchKey, allData, updatedServers) {
 // === CloudBase 数据库缓存（线上使用） ===
 let cbApp = null, cbDb = null;
 function initCloudBase() {
-  if (!cloudbaseSDK) return false;
+  if (!cloudbaseSDK || !isCloudRun) return false;
   if (cbDb) return true;
   try {
     cbApp = cloudbaseSDK.init({ env: 'sihui2026-d6gtqfgdw7803a003' });
@@ -1005,8 +1356,9 @@ function buildDocxReport(raw, branch, loanAmount) {
 
 // ============ API 路由 ============
 
-// SSE 进度推送端点
-app.get('/api/generate-sse', async (req, res) => {
+
+// SSE 进度推送端点（需要认证 + 积分）
+app.get('/api/generate-sse', authMiddleware, async (req, res) => {
   const { companyName, branch, loanAmount } = req.query;
   if (!companyName) return res.status(400).json({ error: '缺少企业名称' });
 
@@ -1021,15 +1373,23 @@ app.get('/api/generate-sse', async (req, res) => {
   try {
     send({ type: 'start', companyName });
 
+    // ===== 积分检查 =====
+    const user = await findUser(req.user.email);
+    const currentPoints = user ? (user.points || 0) : 0;
+    if (currentPoints < REPORT_COST) {
+      send({ type: 'points_insufficient', need: REPORT_COST, have: currentPoints, message: `积分不足！需要 ${REPORT_COST} 积分，当前 ${currentPoints} 积分。` });
+      res.end();
+      return;
+    }
+    send({ type: 'points_check', points: currentPoints, cost: REPORT_COST, remain: currentPoints - REPORT_COST });
+
     // ===== 缓存查询 =====
     send({ type: 'cache_check', message: '正在查询缓存...' });
     const cache = await getCache(companyName);
     const cacheInfo = cache.cacheInfo;
 
     if (cacheInfo.status === 'full_hit') {
-      // 全部命中，直接使用缓存数据
       send({ type: 'cache_hit', status: 'full', message: '缓存全部命中！跳过QCC采集，直接生成报告。', cacheInfo });
-
       send({ type: 'generating', message: '正在生成DOCX报告（缓存数据）...' });
       const doc = buildDocxReport(cache.data, branch || '中国工商银行', loanAmount || '500');
       const buf = await Packer.toBuffer(doc);
@@ -1039,43 +1399,31 @@ app.get('/api/generate-sse', async (req, res) => {
       const filePath = path.join(outDir, fileName);
       fs.writeFileSync(filePath, buf);
 
+      // 扣费
+      const newPoints = await deductPoints(req.user.email);
+      send({ type: 'points_deducted', cost: REPORT_COST, remain: newPoints });
+
       send({ type: 'complete', fileName, filePath, size: buf.length, errors: [], cacheInfo });
       res.end();
       return;
     }
 
-    // ===== 部分命中或未命中，执行采集 =====
     if (cacheInfo.status === 'partial_hit') {
-      send({
-        type: 'cache_hit', status: 'partial',
-        message: `缓存部分命中：${cacheInfo.freshServers.length}个Server复用，${cacheInfo.expiredServers.length}个Server需刷新。`,
-        cacheInfo
-      });
+      send({ type: 'cache_hit', status: 'partial', message: `缓存部分命中：${cacheInfo.freshServers.length}个Server复用，${cacheInfo.expiredServers.length}个Server需刷新。`, cacheInfo });
     } else {
       send({ type: 'cache_miss', message: '缓存未命中，执行全量QCC数据采集...' });
     }
 
-    // 执行数据采集（仅采集过期的 Server）
     const expiredServers = cacheInfo.expiredServers || Object.keys(SERVER_CATEGORY);
     let collectedData = {};
     let allErrors = [];
+    if (cache.hit && cache.data) collectedData = { ...cache.data };
 
-    if (cache.hit && cache.data) {
-      // 部分命中：保留缓存中未过期的数据
-      collectedData = { ...cache.data };
-    }
-
-    // 只采集过期的 Server
     if (expiredServers.length > 0) {
       send({ type: 'collect_start', message: `正在采集 ${expiredServers.length} 个Server的数据...`, expiredServers });
-      const result = await collectAllData(companyName, (p) => {
-        send({ type: 'progress', ...p, cacheInfo });
-      });
-      // 合并新采集的数据
+      const result = await collectAllData(companyName, (p) => { send({ type: 'progress', ...p, cacheInfo }); });
       collectedData = { ...collectedData, ...result.data };
       allErrors = result.errors;
-
-      // 写入缓存
       send({ type: 'cache_saving', message: '正在保存数据到缓存...' });
       await setCache(companyName, collectedData, expiredServers);
       send({ type: 'cache_saved', message: '缓存已更新' });
@@ -1083,13 +1431,16 @@ app.get('/api/generate-sse', async (req, res) => {
 
     send({ type: 'generating', message: '正在生成DOCX报告...' });
     const doc = buildDocxReport(collectedData, branch || '中国工商银行', loanAmount || '500');
-
     const buf = await Packer.toBuffer(doc);
     const safeName = companyName.replace(/[\\/:*?"<>|]/g, '_');
     const fileName = safeName + '_普惠金融授信调查报告.docx';
     const outDir = __dirname;
     const filePath = path.join(outDir, fileName);
     fs.writeFileSync(filePath, buf);
+
+    // 扣费
+    const newPoints = await deductPoints(req.user.email);
+    send({ type: 'points_deducted', cost: REPORT_COST, remain: newPoints });
 
     send({ type: 'complete', fileName, filePath, size: buf.length, errors: allErrors, cacheInfo });
     res.end();
@@ -1100,7 +1451,7 @@ app.get('/api/generate-sse', async (req, res) => {
 });
 
 // 下载已生成的文件
-app.get('/api/download', (req, res) => {
+app.get('/api/download', authMiddleware, (req, res) => {
   const { file } = req.query;
   if (!file) return res.status(400).json({ error: '缺少文件名' });
   const filePath = path.join(__dirname, file);

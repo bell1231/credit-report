@@ -1,0 +1,9 @@
+[缓存] CloudBase SDK 已加载，线上模式：使用数据库缓存
+[用户库] CloudBase 数据库已连接
+
+企业授信报告系统 V3 已启动
+   访问地址: http://localhost:3000
+   报告输出: D:\CodeBuddy\20260625211524
+
+企查查 QCC MCP 6大Server | DOCX专业报告（范例对齐版）
+

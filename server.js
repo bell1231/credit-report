@@ -138,15 +138,88 @@ if (fs.existsSync(SECRET_FILE)) {
 }
 const TOKEN_EXPIRY = 24 * 3600 * 1000; // 24小时
 
-function loadUsers() {
+// ============ 用户数据库（双模：CloudBase / 本地 JSON） ============
+let userDb = null; // CloudBase 数据库实例
+
+// 线上模式：CloudBase SDK 自动鉴权（仅在容器环境启用）
+const isCloudRun = !!process.env.TCB_ENV_ID || !!process.env.TCB_SESSION_TOKEN;
+if (cloudbaseSDK && isCloudRun) {
+  try {
+    const cbApp = cloudbaseSDK.init({ env: 'sihui2026-d6gtqfgdw7803a003' });
+    userDb = cbApp.database();
+    console.log('[用户库] CloudBase 数据库已连接');
+  } catch (e) {
+    console.log('[用户库] CloudBase 连接失败，回退本地:', e.message);
+  }
+}
+
+if (!userDb) {
+  console.log('[用户库] 使用本地 JSON 文件存储');
+}
+
+async function loadUsers() {
+  if (userDb) {
+    try {
+      const res = await userDb.collection('users').limit(1000).get();
+      const users = {};
+      if (res.data) {
+        for (const doc of res.data) {
+          users[doc.email] = doc;
+        }
+      }
+      return users;
+    } catch (e) {
+      console.error('[用户库] CloudBase 读取失败:', e.message);
+    }
+  }
+  // 回退本地
   try {
     if (fs.existsSync(USERS_FILE)) return JSON.parse(fs.readFileSync(USERS_FILE, 'utf-8'));
   } catch {}
   return {};
 }
 
-function saveUsers(users) {
-  fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+async function saveUsers(users) {
+  // 本地始终保存一份
+  try { fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2)); } catch {}
+
+  // CloudBase 同步
+  if (userDb) {
+    for (const [email, userData] of Object.entries(users)) {
+      try {
+        const existing = await userDb.collection('users').where({ email }).limit(1).get();
+        if (existing.data && existing.data.length > 0) {
+          await userDb.collection('users').doc(existing.data[0]._id).update({
+            passwordHash: userData.passwordHash,
+            name: userData.name || email.split('@')[0],
+            updatedAt: Date.now(),
+          });
+        } else {
+          await userDb.collection('users').add({
+            email,
+            passwordHash: userData.passwordHash,
+            name: userData.name || email.split('@')[0],
+            createdAt: userData.createdAt || Date.now(),
+            updatedAt: Date.now(),
+          });
+        }
+      } catch (e) {
+        console.error(`[用户库] 同步失败 ${email}:`, e.message);
+      }
+    }
+  }
+}
+
+// 查找单个用户（CloudBase 优先）
+async function findUser(email) {
+  if (userDb) {
+    try {
+      const res = await userDb.collection('users').where({ email: email.toLowerCase() }).limit(1).get();
+      if (res.data && res.data.length > 0) return res.data[0];
+    } catch (e) { console.error('[用户库] 查找失败:', e.message); }
+  }
+  const users = await loadUsers();
+  return users[email.toLowerCase()] || null;
 }
 
 // 密码哈希
@@ -175,12 +248,11 @@ function verifyToken(token) {
 }
 
 // 登录 API
-app.post('/api/login', (req, res) => {
+app.post('/api/login', async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) return res.json({ success: false, message: '请输入邮箱和密码' });
 
-  const users = loadUsers();
-  const user = users[email.toLowerCase()];
+  const user = await findUser(email);
   if (!user || user.passwordHash !== hashPassword(password)) {
     return res.json({ success: false, message: '账户/密码错误，请重试' });
   }
@@ -194,13 +266,12 @@ app.post('/api/send-code', async (req, res) => {
   const { email, type } = req.body; // type: 'register' | 'reset'
   if (!email || !type) return res.json({ success: false, message: '缺少参数' });
 
-  const users = loadUsers();
-  const emailLower = email.toLowerCase();
+  const existing = await findUser(email);
 
-  if (type === 'register' && users[emailLower]) {
+  if (type === 'register' && existing) {
     return res.json({ success: false, message: '该邮箱已注册，请直接登录' });
   }
-  if (type === 'reset' && !users[emailLower]) {
+  if (type === 'reset' && !existing) {
     return res.json({ success: false, message: '邮箱未注册，请先注册' });
   }
 
@@ -221,49 +292,51 @@ app.post('/api/check-code', (req, res) => {
 });
 
 // 注册 API
-app.post('/api/register', (req, res) => {
+app.post('/api/register', async (req, res) => {
   const { email, password, code } = req.body;
   if (!email || !password || !code) return res.json({ success: false, message: '缺少参数' });
   const pwErr = validatePassword(password);
   if (pwErr) return res.json({ success: false, message: pwErr });
 
   const emailLower = email.toLowerCase();
-  const users = loadUsers();
-  if (users[emailLower]) return res.json({ success: false, message: '该邮箱已注册' });
+  const existing = await findUser(email);
+  if (existing) return res.json({ success: false, message: '该邮箱已注册' });
 
   if (!consumeCode(email, code, 'register')) {
     return res.json({ success: false, message: '验证码错误或已过期' });
   }
 
+  const users = await loadUsers();
   users[emailLower] = {
     email: emailLower,
     passwordHash: hashPassword(password),
     name: emailLower.split('@')[0],
     createdAt: Date.now(),
   };
-  saveUsers(users);
+  await saveUsers(users);
 
   const token = generateToken(emailLower);
   res.json({ success: true, token, email: emailLower, message: '注册成功' });
 });
 
 // 重置密码 API
-app.post('/api/reset-password', (req, res) => {
+app.post('/api/reset-password', async (req, res) => {
   const { email, password, code } = req.body;
   if (!email || !password || !code) return res.json({ success: false, message: '缺少参数' });
   const pwErr = validatePassword(password);
   if (pwErr) return res.json({ success: false, message: pwErr });
 
   const emailLower = email.toLowerCase();
-  const users = loadUsers();
-  if (!users[emailLower]) return res.json({ success: false, message: '邮箱未注册' });
+  const existing = await findUser(email);
+  if (!existing) return res.json({ success: false, message: '邮箱未注册' });
 
   if (!consumeCode(email, code, 'reset')) {
     return res.json({ success: false, message: '验证码错误或已过期' });
   }
 
+  const users = await loadUsers();
   users[emailLower].passwordHash = hashPassword(password);
-  saveUsers(users);
+  await saveUsers(users);
   res.json({ success: true, message: '密码重置成功，请重新登录' });
 });
 
@@ -283,6 +356,39 @@ function authMiddleware(req, res, next) {
   if (!payload) return res.status(401).json({ error: '未登录或登录已过期，请重新登录' });
   req.user = payload;
   next();
+}
+
+// ============ 积分系统 ============
+const REPORT_COST = 200; // 每次生成报告消耗 200 积分
+const POINTS_RATE = 10;  // 1 人民币 = 10 积分
+
+// 获取用户积分
+app.get('/api/points', authMiddleware, async (req, res) => {
+  const user = await findUser(req.user.email);
+  res.json({ points: user ? (user.points || 0) : 0, email: req.user.email, reportCost: REPORT_COST });
+});
+
+// 积分检查 + 扣费中间件（用于报告生成）
+async function pointsMiddleware(req, res, next) {
+  const user = await findUser(req.user.email);
+  if (!user) return res.status(401).json({ error: '用户不存在' });
+  if ((user.points || 0) < REPORT_COST) {
+    return res.status(402).json({ error: '积分不足', need: REPORT_COST, have: user.points || 0, message: `积分不足，需要 ${REPORT_COST} 积分，当前 ${user.points || 0} 积分。请联系管理员充值（1元=10积分）。` });
+  }
+  req.userPoints = user.points || 0;
+  next();
+}
+
+// 扣费（在报告生成成功后调用）
+async function deductPoints(email) {
+  const users = await loadUsers();
+  const key = email.toLowerCase();
+  if (users[key]) {
+    users[key].points = Math.max(0, (users[key].points || 0) - REPORT_COST);
+    await saveUsers(users);
+    return users[key].points;
+  }
+  return 0;
 }
 
 // app.html 直接放行（前端 localStorage 自行校验 + API 层有 authMiddleware 保护）
@@ -526,7 +632,7 @@ async function setFileCache(searchKey, allData, updatedServers) {
 // === CloudBase 数据库缓存（线上使用） ===
 let cbApp = null, cbDb = null;
 function initCloudBase() {
-  if (!cloudbaseSDK) return false;
+  if (!cloudbaseSDK || !isCloudRun) return false;
   if (cbDb) return true;
   try {
     cbApp = cloudbaseSDK.init({ env: 'sihui2026-d6gtqfgdw7803a003' });
@@ -1251,7 +1357,7 @@ function buildDocxReport(raw, branch, loanAmount) {
 // ============ API 路由 ============
 
 
-// SSE 进度推送端点（需要认证）
+// SSE 进度推送端点（需要认证 + 积分）
 app.get('/api/generate-sse', authMiddleware, async (req, res) => {
   const { companyName, branch, loanAmount } = req.query;
   if (!companyName) return res.status(400).json({ error: '缺少企业名称' });
@@ -1267,15 +1373,23 @@ app.get('/api/generate-sse', authMiddleware, async (req, res) => {
   try {
     send({ type: 'start', companyName });
 
+    // ===== 积分检查 =====
+    const user = await findUser(req.user.email);
+    const currentPoints = user ? (user.points || 0) : 0;
+    if (currentPoints < REPORT_COST) {
+      send({ type: 'points_insufficient', need: REPORT_COST, have: currentPoints, message: `积分不足！需要 ${REPORT_COST} 积分，当前 ${currentPoints} 积分。` });
+      res.end();
+      return;
+    }
+    send({ type: 'points_check', points: currentPoints, cost: REPORT_COST, remain: currentPoints - REPORT_COST });
+
     // ===== 缓存查询 =====
     send({ type: 'cache_check', message: '正在查询缓存...' });
     const cache = await getCache(companyName);
     const cacheInfo = cache.cacheInfo;
 
     if (cacheInfo.status === 'full_hit') {
-      // 全部命中，直接使用缓存数据
       send({ type: 'cache_hit', status: 'full', message: '缓存全部命中！跳过QCC采集，直接生成报告。', cacheInfo });
-
       send({ type: 'generating', message: '正在生成DOCX报告（缓存数据）...' });
       const doc = buildDocxReport(cache.data, branch || '中国工商银行', loanAmount || '500');
       const buf = await Packer.toBuffer(doc);
@@ -1285,43 +1399,31 @@ app.get('/api/generate-sse', authMiddleware, async (req, res) => {
       const filePath = path.join(outDir, fileName);
       fs.writeFileSync(filePath, buf);
 
+      // 扣费
+      const newPoints = await deductPoints(req.user.email);
+      send({ type: 'points_deducted', cost: REPORT_COST, remain: newPoints });
+
       send({ type: 'complete', fileName, filePath, size: buf.length, errors: [], cacheInfo });
       res.end();
       return;
     }
 
-    // ===== 部分命中或未命中，执行采集 =====
     if (cacheInfo.status === 'partial_hit') {
-      send({
-        type: 'cache_hit', status: 'partial',
-        message: `缓存部分命中：${cacheInfo.freshServers.length}个Server复用，${cacheInfo.expiredServers.length}个Server需刷新。`,
-        cacheInfo
-      });
+      send({ type: 'cache_hit', status: 'partial', message: `缓存部分命中：${cacheInfo.freshServers.length}个Server复用，${cacheInfo.expiredServers.length}个Server需刷新。`, cacheInfo });
     } else {
       send({ type: 'cache_miss', message: '缓存未命中，执行全量QCC数据采集...' });
     }
 
-    // 执行数据采集（仅采集过期的 Server）
     const expiredServers = cacheInfo.expiredServers || Object.keys(SERVER_CATEGORY);
     let collectedData = {};
     let allErrors = [];
+    if (cache.hit && cache.data) collectedData = { ...cache.data };
 
-    if (cache.hit && cache.data) {
-      // 部分命中：保留缓存中未过期的数据
-      collectedData = { ...cache.data };
-    }
-
-    // 只采集过期的 Server
     if (expiredServers.length > 0) {
       send({ type: 'collect_start', message: `正在采集 ${expiredServers.length} 个Server的数据...`, expiredServers });
-      const result = await collectAllData(companyName, (p) => {
-        send({ type: 'progress', ...p, cacheInfo });
-      });
-      // 合并新采集的数据
+      const result = await collectAllData(companyName, (p) => { send({ type: 'progress', ...p, cacheInfo }); });
       collectedData = { ...collectedData, ...result.data };
       allErrors = result.errors;
-
-      // 写入缓存
       send({ type: 'cache_saving', message: '正在保存数据到缓存...' });
       await setCache(companyName, collectedData, expiredServers);
       send({ type: 'cache_saved', message: '缓存已更新' });
@@ -1329,13 +1431,16 @@ app.get('/api/generate-sse', authMiddleware, async (req, res) => {
 
     send({ type: 'generating', message: '正在生成DOCX报告...' });
     const doc = buildDocxReport(collectedData, branch || '中国工商银行', loanAmount || '500');
-
     const buf = await Packer.toBuffer(doc);
     const safeName = companyName.replace(/[\\/:*?"<>|]/g, '_');
     const fileName = safeName + '_普惠金融授信调查报告.docx';
     const outDir = __dirname;
     const filePath = path.join(outDir, fileName);
     fs.writeFileSync(filePath, buf);
+
+    // 扣费
+    const newPoints = await deductPoints(req.user.email);
+    send({ type: 'points_deducted', cost: REPORT_COST, remain: newPoints });
 
     send({ type: 'complete', fileName, filePath, size: buf.length, errors: allErrors, cacheInfo });
     res.end();

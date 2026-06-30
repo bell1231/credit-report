@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>Fetch Test</title></head>
+<body>
+<h2>Fetch 连通性测试</h2>
+<div id="result">测试中...</div>
+<script>
+(async () => {
+  const div = document.getElementById('result');
+  const apiUrl = window.location.origin + '/api/health';
+
+  div.innerHTML = '尝试 GET ' + apiUrl + ' ...<br>origin=' + window.location.origin;
+
+  try {
+    const resp = await fetch(apiUrl);
+    div.innerHTML += '<br>✅ GET 成功: ' + resp.status + ' ' + resp.statusText;
+    const json = await resp.json();
+    div.innerHTML += '<br>✅ 响应: ' + JSON.stringify(json);
+  } catch(e) {
+    div.innerHTML += '<br>❌ GET 失败: ' + e.message;
+  }
+
+  // Test POST
+  div.innerHTML += '<br><br>尝试 POST /api/query ...';
+  try {
+    const resp = await fetch(window.location.origin + '/api/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ companyName: '测试公司', branch: '测试支行' })
+    });
+    div.innerHTML += '<br>✅ POST 状态: ' + resp.status;
+    const text = await resp.text();
+    div.innerHTML += '<br>✅ 响应长度: ' + text.length + ' 字符';
+  } catch(e) {
+    div.innerHTML += '<br>❌ POST 失败: ' + e.message;
+  }
+})();
+</script>
+</body>
+</html>

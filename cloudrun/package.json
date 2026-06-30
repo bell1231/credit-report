@@ -1,13 +1,10 @@
 {
-  "name": "credit-report-v4",
-  "version": "2.0.0",
-  "description": "企业授信报告系统 V4 - 企查查 QCC MCP 6大Server + CloudBase缓存 DOCX生成",
-  "scripts": {
-    "start": "node server.js"
-  },
   "dependencies": {
-    "cors": "^2.8.5",
+    "@cloudbase/node-sdk": "^3.18.3",
+    "cors": "^2.8.6",
     "docx": "^9.7.1",
-    "express": "^4.18.2"
+    "express": "^5.2.1",
+    "nodemailer": "^9.0.1",
+    "ws": "^8.21.0"
   }
 }

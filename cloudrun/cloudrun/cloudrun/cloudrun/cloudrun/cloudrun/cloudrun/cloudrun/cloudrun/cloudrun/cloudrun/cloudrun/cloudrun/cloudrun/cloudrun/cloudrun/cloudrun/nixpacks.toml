@@ -1,0 +1,9 @@
+# Railway / Nixpacks 构建配置
+[phases.setup]
+nixPkgs = ["nodejs"]
+
+[phases.install]
+cmds = ["npm install"]
+
+[start]
+cmd = "node server/index.js"

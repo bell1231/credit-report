@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>企业授信报告系统 V4 — 企查查 QCC MCP 6大Server + 智能缓存</title>
+  <style>
+    :root {
+      --primary: #1a2d4e; --accent: #1d6fa4; --gold: #c8941a;
+      --bg: #f5f7fa; --card-bg: #fff; --text: #2c3e50;
+      --text-light: #6b7d8e; --border: #dce3ec; --success: #1e8449;
+      --warning: #d68910; --danger: #c0392b;
+      --shadow: 0 2px 12px rgba(0,0,0,0.08); --radius: 10px;
+    }
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body {
+      font-family: "PingFang SC","Microsoft YaHei","Hiragino Sans GB",sans-serif;
+      background: var(--bg); color: var(--text); min-height: 100vh;
+    }
+    .header {
+      background: linear-gradient(145deg,#051827 0%,#0a2a4a 55%,#0d3561 100%);
+      color: #fff; padding: 0 40px; height: 64px; display: flex;
+      align-items: center; justify-content: space-between;
+      box-shadow: 0 2px 16px rgba(0,0,0,0.2); position: sticky; top: 0; z-index: 100;
+    }
+    .header-brand { display: flex; align-items: center; gap: 12px; font-size: 18px; font-weight: 700; letter-spacing: 1px; }
+    .header-brand .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--gold); }
+    .header-badge { background: rgba(255,255,255,0.12); padding: 4px 14px; border-radius: 14px; font-size: 12px; }
+    .container { max-width: 800px; margin: 0 auto; padding: 30px 18px; }
+    .card { background: var(--card-bg); border-radius: var(--radius); box-shadow: var(--shadow); padding: 28px 30px; margin-bottom: 20px; }
+    .card h2 { font-size: 17px; font-weight: 700; color: var(--primary); margin-bottom: 18px; display: flex; align-items: center; gap: 8px; }
+    .form-group { margin-bottom: 16px; }
+    .form-group label { display: block; font-size: 13px; font-weight: 700; color: var(--primary); margin-bottom: 6px; }
+    .form-group input, .form-group select {
+      width: 100%; padding: 10px 14px; border: 1.5px solid var(--border);
+      border-radius: 6px; font-size: 14px; outline: none; transition: border-color 0.2s;
+      font-family: inherit;
+    }
+    .form-group input:focus, .form-group select:focus { border-color: var(--accent); }
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 12px 32px; border: none; border-radius: 6px;
+      font-size: 15px; font-weight: 700; cursor: pointer; transition: all 0.2s;
+      font-family: inherit;
+    }
+    .btn-primary { background: var(--accent); color: #fff; width: 100%; justify-content: center; }
+    .btn-primary:hover { background: #165a85; }
+    .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
+    .btn-download { background: var(--success); color: #fff; margin-top: 12px; width: 100%; justify-content: center; }
+    .btn-download:hover { background: #176b39; }
+
+    .quick-btn {
+      padding: 5px 14px; border: 1.5px solid var(--border); border-radius: 6px;
+      background: #fff; color: var(--text); font-size: 13px; cursor: pointer;
+      transition: all 0.15s; font-family: inherit;
+    }
+    .quick-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .quick-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+    .progress-section { display: none; margin-top: 20px; }
+    .progress-section.active { display: block; }
+    .progress-bar-wrap { background: #e9ecef; border-radius: 8px; height: 12px; overflow: hidden; margin-bottom: 12px; }
+    .progress-bar { height: 100%; background: linear-gradient(90deg,var(--accent),#2ecc71); border-radius: 8px; transition: width 0.3s; width: 0%; }
+    .progress-stats { display: flex; justify-content: space-between; font-size: 12px; color: var(--text-light); margin-bottom: 8px; }
+    .log-box {
+      background: #1a1d23; color: #7ecb7e; border-radius: 6px; padding: 14px;
+      font-family: "Consolas","Courier New",monospace; font-size: 12px;
+      max-height: 300px; overflow-y: auto; line-height: 1.8;
+    }
+    .log-box .log-err { color: #e06c75; }
+    .log-box .log-ok { color: #7ecb7e; }
+    .log-box .log-info { color: #61afef; }
+
+    .result-section { display: none; margin-top: 20px; }
+    .result-section.active { display: block; }
+    .result-card { background: #e8f5e9; border-left: 4px solid var(--success); border-radius: 6px; padding: 20px; }
+    .result-card h3 { font-size: 15px; color: var(--success); margin-bottom: 10px; }
+
+    .cache-info { background: #fff8e1; border-left: 4px solid var(--gold); border-radius: 6px; padding: 12px 16px; margin-bottom: 12px; font-size: 13px; display: none; }
+    .cache-info.active { display: block; }
+    .cache-info.full-hit { background: #e8f5e9; border-left-color: var(--success); }
+    .cache-info .cache-tag { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 11px; font-weight: 700; margin-right: 6px; }
+    .cache-info .cache-tag.hit { background: #c8e6c9; color: #2e7d32; }
+    .cache-info .cache-tag.partial { background: #fff3e0; color: #e65100; }
+    .cache-info .cache-tag.miss { background: #f5f5f5; color: #757575; }
+    .points-saved { font-size: 13px; color: #2e7d32; font-weight: 700; margin-top: 4px; }
+    .points-saved .points-num { font-size: 20px; }
+
+    .footer { text-align: center; padding: 20px; color: var(--text-light); font-size: 12px; }
+
+    .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    @media (max-width: 600px) { .container { padding: 16px; } .card { padding: 20px; } }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-brand">
+    <span class="dot"></span>企业授信报告系统
+    <span style="font-weight:400;font-size:14px;opacity:0.8;">V4 · QCC MCP 6大Server + 智能缓存</span>
+  </div>
+  <div style="display:flex;align-items:center;gap:12px;">
+    <span id="userDisplay" style="font-size:13px;opacity:0.9;"></span>
+    <button onclick="logout()" style="background:rgba(255,255,255,0.15);border:1px solid rgba(255,255,255,0.3);color:#fff;padding:5px 14px;border-radius:4px;cursor:pointer;font-size:12px;font-family:inherit;">退出登录</button>
+  </div>
+</div>
+
+<div class="container">
+
+  <!-- 输入卡片 -->
+  <div class="card" id="inputCard">
+    <h2>📋 生成授信调查报告</h2>
+    <div class="form-group">
+      <label>企业全称（必填）</label>
+      <input type="text" id="companyName" placeholder="请输入企业完整名称" />
+    </div>
+    <div class="form-group">
+      <label>调查机构 / 银行支行</label>
+      <input type="text" id="branch" placeholder="请输入调查机构/银行支行名称" />
+    </div>
+    <div class="form-group">
+      <label>授信金额（万元）</label>
+      <div style="display:flex;gap:8px;">
+        <input type="number" id="loanAmount" placeholder="请输入授信金额" value="500" min="1" style="flex:1;" />
+      </div>
+      <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">
+        <button type="button" class="quick-btn" onclick="setLoanAmount(100)">100万</button>
+        <button type="button" class="quick-btn" onclick="setLoanAmount(300)">300万</button>
+        <button type="button" class="quick-btn active" onclick="setLoanAmount(500)">500万</button>
+        <button type="button" class="quick-btn" onclick="setLoanAmount(800)">800万</button>
+        <button type="button" class="quick-btn" onclick="setLoanAmount(1000)">1000万</button>
+        <button type="button" class="quick-btn" onclick="setLoanAmount(2000)">2000万</button>
+      </div>
+    </div>
+    <button class="btn btn-primary" id="generateBtn" onclick="startGenerate()">
+      🚀 开始生成授信报告
+    </button>
+    <p style="font-size:12px;color:var(--text-light);margin-top:12px;">
+      ⚠️ 请使用完整企业名称（企查查要求精确匹配）。生成过程约需 1-2 分钟（调用 6 大 Server 共 106 个工具）。
+    </p>
+  </div>
+
+  <!-- 进度卡片 -->
+  <div class="card progress-section" id="progressCard">
+    <h2 id="progressTitle">⏳ 数据采集中...</h2>
+    <div class="cache-info" id="cacheInfoBox"></div>
+    <div class="progress-stats">
+      <span id="progressText">准备中...</span>
+      <span id="progressCount">0 / 106</span>
+    </div>
+    <div class="progress-bar-wrap">
+      <div class="progress-bar" id="progressBar"></div>
+    </div>
+    <div class="log-box" id="logBox"></div>
+  </div>
+
+  <!-- 结果卡片 -->
+  <div class="card result-section" id="resultCard">
+    <h2>✅ 报告生成完成</h2>
+    <div class="result-card">
+      <h3 id="resultTitle"></h3>
+      <p id="resultInfo" style="font-size:13px;color:#555;"></p>
+
+    </div>
+    <button class="btn btn-download" id="downloadBtn" onclick="downloadReport()">
+      📥 下载 DOCX 授信报告
+    </button>
+    <button class="btn" style="background:#eee;color:var(--text);margin-top:8px;width:100%;justify-content:center;" onclick="resetForm()">
+      🔄 生成新报告
+    </button>
+  </div>
+
+</div>
+
+<div class="footer">
+  数据来源：企查查 QCC MCP 平台（company / risk / ipr / operation / executive / history 六大Server）<br/>
+  报告基于"三品三表三流"普惠金融尽调方法论编制 · 仅供内部审批参考
+</div>
+
+<script>
+// ========== 登录态检查 ==========
+const AUTH_TOKEN = localStorage.getItem('auth_token');
+const USER_EMAIL = localStorage.getItem('user_email');
+
+if (!AUTH_TOKEN) {
+  window.location.href = '/login.html';
+} else {
+  // 显示当前用户
+  document.getElementById('userDisplay').textContent = USER_EMAIL || '已登录';
+  // 后台验证 token 有效性
+  fetch('/api/verify', { headers: { 'Authorization': 'Bearer ' + AUTH_TOKEN } })
+    .then(r => r.json())
+    .then(data => { if (!data.valid) { localStorage.clear(); window.location.href = '/login.html'; } });
+}
+
+function logout() {
+  localStorage.clear();
+  window.location.href = '/login.html';
+}
+
+// 为所有 API 请求自动附加 token
+const originalFetch = window.fetch;
+window.fetch = function(url, options = {}) {
+  if (AUTH_TOKEN && (url.includes('/api/') || url.includes('/api-'))) {
+    options.headers = options.headers || {};
+    options.headers['Authorization'] = 'Bearer ' + AUTH_TOKEN;
+  }
+  return originalFetch(url, options);
+};
+
+let generatedFile = null;
+
+function setLoanAmount(val) {
+  document.getElementById('loanAmount').value = val;
+  document.querySelectorAll('.quick-btn').forEach(b => b.classList.remove('active'));
+  const btns = document.querySelectorAll('.quick-btn');
+  btns.forEach(b => { if (parseInt(b.textContent) === val) b.classList.add('active'); });
+}
+
+function log(msg, type) {
+  const box = document.getElementById('logBox');
+  const cls = type === 'error' ? 'log-err' : type === 'info' ? 'log-info' : 'log-ok';
+  box.innerHTML += `<span class="${cls}">${msg}</span>\n`;
+  box.scrollTop = box.scrollHeight;
+}
+
+function showCacheInfo(cacheInfo) {
+  const box = document.getElementById('cacheInfoBox');
+  box.className = 'cache-info active';
+  if (!cacheInfo) { box.classList.remove('active'); return; }
+
+  let html = '';
+  if (cacheInfo.status === 'full_hit') {
+    box.classList.add('full-hit');
+    html += '<span class="cache-tag hit">🔋 缓存全部命中</span> ';
+    html += '无需调用企查查API，直接复用缓存数据！';
+  } else if (cacheInfo.status === 'partial_hit') {
+    html += '<span class="cache-tag partial">📦 缓存部分命中</span> ';
+    html += `${cacheInfo.freshServers.length}个Server复用缓存，${cacheInfo.expiredServers.length}个Server需刷新。`;
+  } else {
+    html += '<span class="cache-tag miss">🆕 缓存未命中</span> 执行全量QCC数据采集（106个工具）...';
+  }
+  box.innerHTML = html;
+}
+
+async function startGenerate() {
+  const company = document.getElementById('companyName').value.trim();
+  const branch = document.getElementById('branch').value.trim();
+  const loanAmount = document.getElementById('loanAmount').value;
+
+  if (!company) { alert('请输入企业全称'); return; }
+
+  // UI 切换
+  document.getElementById('inputCard').style.display = 'none';
+  document.getElementById('progressCard').classList.add('active');
+  document.getElementById('resultCard').classList.remove('active');
+  document.getElementById('logBox').innerHTML = '';
+  document.getElementById('cacheInfoBox').classList.remove('active', 'full-hit');
+  document.getElementById('progressTitle').textContent = '⏳ 数据采集中...';
+  generatedFile = null;
+
+  const origin = window.location.origin || 'http://localhost:3000';
+  const url = origin + '/api/generate-sse?companyName=' + encodeURIComponent(company) + '&branch=' + encodeURIComponent(branch || '') + '&loanAmount=' + loanAmount + '&token=' + encodeURIComponent(AUTH_TOKEN);
+
+  log('[系统] 开始采集数据...', 'info');
+  log('[系统] 企业: ' + company, 'info');
+
+  try {
+    const eventSource = new EventSource(url);
+
+    eventSource.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+
+      switch (data.type) {
+        case 'start':
+          log('[系统] 连接成功，开始检查缓存...', 'info');
+          break;
+
+        case 'cache_check':
+          log('🔍 ' + data.message, 'info');
+          break;
+
+        case 'cache_hit':
+          if (data.status === 'full') {
+            log('🔋 ' + data.message, 'info');
+            showCacheInfo(data.cacheInfo);
+            document.getElementById('progressTitle').textContent = '🎯 缓存命中，跳过采集！';
+            document.getElementById('progressBar').style.width = '100%';
+            document.getElementById('progressCount').textContent = '0 / 0';
+            document.getElementById('progressText').textContent = '使用缓存数据，无需API调用';
+          } else {
+            log('📦 ' + data.message, 'info');
+            showCacheInfo(data.cacheInfo);
+            document.getElementById('progressTitle').textContent = '⏳ 部分刷新中...';
+          }
+          break;
+
+        case 'cache_miss':
+          log('🆕 ' + data.message, 'info');
+          showCacheInfo({ status: 'miss' });
+          break;
+
+        case 'collect_start':
+          log('📡 ' + data.message, 'info');
+          break;
+
+        case 'progress':
+          const pct = Math.round(data.step / data.total * 100);
+          document.getElementById('progressBar').style.width = pct + '%';
+          document.getElementById('progressCount').textContent = data.step + ' / ' + data.total;
+          document.getElementById('progressText').textContent = '正在采集: ' + (data.label || data.tool);
+
+          if (data.ok) {
+            log('✅ ' + (data.label || data.tool), 'ok');
+          } else {
+            log('❌ ' + (data.label || data.tool) + ': ' + (data.error || '失败'), 'error');
+          }
+          break;
+
+        case 'cache_saving':
+          log('💾 ' + data.message, 'info');
+          break;
+
+        case 'cache_saved':
+          log('✅ ' + data.message, 'ok');
+          break;
+
+        case 'generating':
+          log('📝 ' + (data.message || '数据采集完成，正在生成 DOCX 报告...'), 'info');
+          document.getElementById('progressText').textContent = data.message || '正在生成 DOCX 报告...';
+          break;
+
+        case 'complete':
+          eventSource.close();
+          generatedFile = data.fileName;
+          document.getElementById('progressCard').classList.remove('active');
+          document.getElementById('resultCard').classList.add('active');
+          document.getElementById('resultTitle').textContent = data.fileName;
+
+          let resultHtml = '文件大小: ' + (data.size / 1024).toFixed(1) + ' KB<br/>';
+          resultHtml += '数据工具: ' + (data.errors && data.errors.length > 0 ? (106 - data.errors.length) + '/106 成功' : '106/106 全部成功');
+          if (data.errors && data.errors.length > 0) resultHtml += '<br/>⚠️ ' + data.errors.length + ' 个工具异常（非关键）';
+          if (data.cacheInfo && data.cacheInfo.status === 'full_hit') {
+            resultHtml += '<br/>🔋 本次全部使用缓存，0 API调用';
+          }
+          document.getElementById('resultInfo').innerHTML = resultHtml;
+
+          break;
+
+        case 'error':
+          eventSource.close();
+          log('💥 错误: ' + data.message, 'error');
+          document.getElementById('progressText').textContent = '生成失败: ' + data.message;
+          break;
+      }
+    };
+
+    eventSource.onerror = (e) => {
+      eventSource.close();
+      log('💥 连接中断', 'error');
+    };
+
+  } catch (e) {
+    log('💥 请求失败: ' + e.message, 'error');
+  }
+}
+
+function downloadReport() {
+  if (!generatedFile) return;
+  const origin = window.location.origin || 'http://localhost:3000';
+  window.open(origin + '/api/download?file=' + encodeURIComponent(generatedFile) + '&token=' + encodeURIComponent(AUTH_TOKEN), '_blank');
+}
+
+function resetForm() {
+  document.getElementById('inputCard').style.display = '';
+  document.getElementById('progressCard').classList.remove('active');
+  document.getElementById('resultCard').classList.remove('active');
+  document.getElementById('progressBar').style.width = '0%';
+  generatedFile = null;
+}
+</script>
+</body>
+</html>

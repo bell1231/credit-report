@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>企业授信报告系统 — 登录</title>
+  <style>
+    :root {
+      --primary: #1a2d4e; --accent: #1d6fa4; --gold: #c8941a;
+      --bg: #f5f7fa; --text: #2c3e50; --text-light: #6b7d8e;
+      --danger: #c0392b; --shadow: 0 4px 24px rgba(0,0,0,0.12);
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: "PingFang SC","Microsoft YaHei","Hiragino Sans GB",sans-serif;
+      background: linear-gradient(145deg, #051827 0%, #0a2a4a 40%, #0d3561 100%);
+      min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    }
+    .login-box {
+      background: #fff; border-radius: 14px; box-shadow: var(--shadow);
+      width: 420px; padding: 44px 40px 36px;
+    }
+    .login-box .logo {
+      text-align: center; margin-bottom: 28px;
+      font-size: 22px; font-weight: 700; color: var(--primary);
+    }
+    .login-box .logo .dot {
+      display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+      background: var(--gold); margin-right: 8px; vertical-align: middle;
+    }
+    .login-box .subtitle {
+      text-align: center; font-size: 13px; color: var(--text-light); margin-top: -16px; margin-bottom: 28px;
+    }
+    .form-group { margin-bottom: 18px; }
+    .form-group label {
+      display: block; font-size: 13px; font-weight: 700; color: var(--primary); margin-bottom: 6px;
+    }
+    .form-group input {
+      width: 100%; padding: 11px 14px; border: 1.5px solid #dce3ec;
+      border-radius: 6px; font-size: 14px; outline: none; font-family: inherit;
+      transition: border-color 0.2s;
+    }
+    .form-group input:focus { border-color: var(--accent); }
+    .btn-login {
+      width: 100%; padding: 12px; border: none; border-radius: 6px;
+      background: var(--accent); color: #fff; font-size: 15px; font-weight: 700;
+      cursor: pointer; margin-top: 4px; transition: background 0.2s; font-family: inherit;
+    }
+    .btn-login:hover { background: #165a85; }
+    .btn-login:disabled { opacity: 0.6; cursor: not-allowed; }
+    .pw-wrapper { position: relative; }
+    .eye-btn {
+      position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+      background: none; border: none; cursor: pointer; font-size: 16px; color: #999; padding: 4px;
+    }
+    .links {
+      display: flex; justify-content: space-between; margin-top: 16px; font-size: 13px;
+    }
+    .links a { text-decoration: none; }
+    .links a:hover { text-decoration: underline; }
+    .error-msg {
+      background: #fdecea; border: 1px solid #f5c6cb; color: var(--danger);
+      border-radius: 6px; padding: 10px 14px; font-size: 13px; margin-bottom: 16px;
+      display: none;
+    }
+    .error-msg.show { display: block; }
+    .footer {
+      text-align: center; margin-top: 20px; font-size: 11px; color: rgba(255,255,255,0.5);
+    }
+  </style>
+</head>
+<body>
+
+<div class="login-box">
+  <div class="logo">
+    <span class="dot"></span>企业授信报告系统
+  </div>
+  <div class="subtitle">普惠金融 · DOCX专业报告 · QCC 6大Server</div>
+
+  <div class="error-msg" id="errorMsg"></div>
+
+  <form id="loginForm" onsubmit="handleLogin(event)">
+    <div class="form-group">
+      <label>邮箱地址</label>
+      <input type="email" id="email" placeholder="请输入邮箱地址" required autocomplete="email" />
+    </div>
+    <div class="form-group">
+      <label>密码</label>
+      <div class="pw-wrapper">
+        <input type="password" id="password" placeholder="请输入密码" required autocomplete="current-password" />
+        <button type="button" class="eye-btn" onclick="togglePw()" title="显示/隐藏密码">👁️</button>
+      </div>
+    </div>
+    <button type="submit" class="btn-login" id="loginBtn">登 录</button>
+  </form>
+
+  <div class="links">
+    <a href="/reset.html" style="color: var(--accent);">忘记密码</a>
+    <a href="/register.html" style="color: var(--accent);">没有帐户？注册新账户</a>
+  </div>
+</div>
+
+
+
+<script>
+function togglePw() {
+  const input = document.getElementById('password');
+  input.type = input.type === 'password' ? 'text' : 'password';
+  document.querySelector('.eye-btn').textContent = input.type === 'password' ? '👁️' : '🙈';
+}
+
+async function handleLogin(e) {
+  e.preventDefault();
+  const email = document.getElementById('email').value.trim();
+  const password = document.getElementById('password').value;
+  const errorBox = document.getElementById('errorMsg');
+  const btn = document.getElementById('loginBtn');
+
+  if (!email || !password) {
+    errorBox.textContent = '请输入邮箱和密码';
+    errorBox.classList.add('show');
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = '登录中...';
+  errorBox.classList.remove('show');
+
+  try {
+    const origin = window.location.origin || 'http://localhost:3000';
+    const res = await fetch(origin + '/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+
+    const data = await res.json();
+
+    if (data.success) {
+      // 登录成功，存储 token 并跳转
+      localStorage.setItem('auth_token', data.token);
+      localStorage.setItem('user_email', data.email);
+      window.location.href = '/app.html';
+    } else {
+      errorBox.textContent = data.message || '登录失败，请检查邮箱和密码';
+      errorBox.classList.add('show');
+    }
+  } catch (err) {
+    errorBox.textContent = '网络错误，请稍后重试';
+    errorBox.classList.add('show');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '登 录';
+  }
+}
+
+// 如果已登录，直接跳转
+if (localStorage.getItem('auth_token')) {
+  window.location.href = '/app.html';
+}
+</script>
+
+</body>
+</html>
