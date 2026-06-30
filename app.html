@@ -101,7 +101,10 @@
     <span class="dot"></span>企业授信报告系统
     <span style="font-weight:400;font-size:14px;opacity:0.8;">V4 · QCC MCP 6大Server + 智能缓存</span>
   </div>
-  <span class="header-badge">普惠金融 · DOCX专业报告</span>
+  <div style="display:flex;align-items:center;gap:12px;">
+    <span id="userDisplay" style="font-size:13px;opacity:0.9;"></span>
+    <button onclick="logout()" style="background:rgba(255,255,255,0.15);border:1px solid rgba(255,255,255,0.3);color:#fff;padding:5px 14px;border-radius:4px;cursor:pointer;font-size:12px;font-family:inherit;">退出登录</button>
+  </div>
 </div>
 
 <div class="container">
@@ -177,6 +180,36 @@
 </div>
 
 <script>
+// ========== 登录态检查 ==========
+const AUTH_TOKEN = localStorage.getItem('auth_token');
+const USER_EMAIL = localStorage.getItem('user_email');
+
+if (!AUTH_TOKEN) {
+  window.location.href = '/login.html';
+} else {
+  // 显示当前用户
+  document.getElementById('userDisplay').textContent = USER_EMAIL || '已登录';
+  // 后台验证 token 有效性
+  fetch('/api/verify', { headers: { 'Authorization': 'Bearer ' + AUTH_TOKEN } })
+    .then(r => r.json())
+    .then(data => { if (!data.valid) { localStorage.clear(); window.location.href = '/login.html'; } });
+}
+
+function logout() {
+  localStorage.clear();
+  window.location.href = '/login.html';
+}
+
+// 为所有 API 请求自动附加 token
+const originalFetch = window.fetch;
+window.fetch = function(url, options = {}) {
+  if (AUTH_TOKEN && (url.includes('/api/') || url.includes('/api-'))) {
+    options.headers = options.headers || {};
+    options.headers['Authorization'] = 'Bearer ' + AUTH_TOKEN;
+  }
+  return originalFetch(url, options);
+};
+
 let generatedFile = null;
 
 function setLoanAmount(val) {
@@ -229,7 +262,7 @@ async function startGenerate() {
   generatedFile = null;
 
   const origin = window.location.origin || 'http://localhost:3000';
-  const url = origin + '/api/generate-sse?companyName=' + encodeURIComponent(company) + '&branch=' + encodeURIComponent(branch || '') + '&loanAmount=' + loanAmount;
+  const url = origin + '/api/generate-sse?companyName=' + encodeURIComponent(company) + '&branch=' + encodeURIComponent(branch || '') + '&loanAmount=' + loanAmount + '&token=' + encodeURIComponent(AUTH_TOKEN);
 
   log('[系统] 开始采集数据...', 'info');
   log('[系统] 企业: ' + company, 'info');
@@ -337,7 +370,7 @@ async function startGenerate() {
 function downloadReport() {
   if (!generatedFile) return;
   const origin = window.location.origin || 'http://localhost:3000';
-  window.open(origin + '/api/download?file=' + encodeURIComponent(generatedFile), '_blank');
+  window.open(origin + '/api/download?file=' + encodeURIComponent(generatedFile) + '&token=' + encodeURIComponent(AUTH_TOKEN), '_blank');
 }
 
 function resetForm() {
